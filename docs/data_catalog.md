@@ -47,8 +47,10 @@
 
 ## Notes
 
-- All three Gold objects are views (`CREATE VIEW`), not physical tables — they
-  always reflect the latest Silver data with no separate load step.
-- Surrogate keys are `ROW_NUMBER()`-generated and are stable only within a
-  given Gold refresh; they are not guaranteed to match prior runs if the
-  underlying Silver row order changes.
+- All three Gold objects are physical Delta tables, built by merging Silver
+  tables in pandas and writing with `mode('overwrite')`. Unlike a SQL view,
+  they do **not** auto-refresh — re-run `03_gold_tables` after any Silver
+  reload to keep them current.
+- Surrogate keys are generated from pandas row position (`index + 1`) at
+  build time; they are not guaranteed to match prior runs if the underlying
+  Silver row order changes.

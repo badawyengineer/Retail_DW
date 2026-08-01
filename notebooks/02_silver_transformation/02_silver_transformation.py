@@ -5,21 +5,29 @@
 # MAGIC rules that came out of the profiling pass (project doc, section 4.4),
 # MAGIC and writes each result as a Silver Delta table. Every table gains a
 # MAGIC `dwh_create_date` column marking when the row was loaded into Silver.
+# MAGIC
+# MAGIC Transform logic is all **pandas** — each Bronze Delta table is pulled
+# MAGIC into a pandas DataFrame with `.toPandas()`, cleaned, then handed back to
+# MAGIC Spark only for the final `saveAsTable()` write. `.toPandas()` collects
+# MAGIC the full table onto the driver, which is fine for a dataset this size,
+# MAGIC but is the tradeoff worth knowing about vs. the distributed PySpark
+# MAGIC version.
 
 # COMMAND ----------
 
-from pyspark.sql import functions as F
-from pyspark.sql.window import Window
+import pandas as pd
+import numpy as np
+from datetime import datetime, date
 
 CATALOG = "retail_dwh"
 
 def read_bronze(table):
-    return spark.table(f"{CATALOG}.bronze.{table}")
+    return spark.table(f"{CATALOG}.bronze.{table}").toPandas()
 
-def write_silver(df, table):
-    (df.withColumn("dwh_create_date", F.current_timestamp())
-       .write.mode("overwrite")
-       .saveAsTable(f"{CATALOG}.silver.{table}"))
+def write_silver(pdf, table):
+    pdf = pdf.copy()
+    pdf["dwh_create_date"] = datetime.now()
+    spark.createDataFrame(pdf).write.mode("overwrite").saveAsTable(f"{CATALOG}.silver.{table}")
 
 # COMMAND ----------
 
@@ -30,30 +38,30 @@ def write_silver(df, table):
 
 # COMMAND ----------
 
-src = read_bronze("crm_cust_info")
+df = read_bronze("crm_cust_info")
 
-w = Window.partitionBy("cst_id").orderBy(F.col("cst_create_date").desc())
+df["cst_create_date"] = pd.to_datetime(df["cst_create_date"], errors="coerce")
 
 crm_cust_info_silver = (
-    src
-    .filter(F.col("cst_id").isNotNull())
-    .withColumn("rn", F.row_number().over(w))
-    .filter(F.col("rn") == 1)
-    .drop("rn")
-    .withColumn("cst_firstname", F.trim("cst_firstname"))
-    .withColumn("cst_lastname", F.trim("cst_lastname"))
-    .withColumn(
-        "cst_marital_status",
-        F.when(F.upper(F.trim("cst_marital_status")) == "S", "Single")
-         .when(F.upper(F.trim("cst_marital_status")) == "M", "Married")
-         .otherwise("n/a")
-    )
-    .withColumn(
-        "cst_gndr",
-        F.when(F.upper(F.trim("cst_gndr")) == "M", "Male")
-         .when(F.upper(F.trim("cst_gndr")) == "F", "Female")
-         .otherwise("n/a")
-    )
+    df[df["cst_id"].notna() & (df["cst_id"] != "")]
+    .sort_values("cst_create_date", ascending=False)
+    .drop_duplicates(subset="cst_id", keep="first")
+    .copy()
+)
+
+crm_cust_info_silver["cst_firstname"] = crm_cust_info_silver["cst_firstname"].str.strip()
+crm_cust_info_silver["cst_lastname"] = crm_cust_info_silver["cst_lastname"].str.strip()
+
+crm_cust_info_silver["cst_marital_status"] = (
+    crm_cust_info_silver["cst_marital_status"].str.strip().str.upper()
+    .map({"S": "Single", "M": "Married"})
+    .fillna("n/a")
+)
+
+crm_cust_info_silver["cst_gndr"] = (
+    crm_cust_info_silver["cst_gndr"].str.strip().str.upper()
+    .map({"M": "Male", "F": "Female"})
+    .fillna("n/a")
 )
 
 write_silver(crm_cust_info_silver, "crm_cust_info")
@@ -68,28 +76,26 @@ write_silver(crm_cust_info_silver, "crm_cust_info")
 
 # COMMAND ----------
 
-src = read_bronze("crm_prd_info")
+df = read_bronze("crm_prd_info")
 
-w = Window.partitionBy("prd_key").orderBy("prd_start_dt")
+crm_prd_info_silver = df.copy()
+crm_prd_info_silver["cat_id"] = crm_prd_info_silver["prd_key"].str[:5].str.replace("-", "_", regex=False)
+crm_prd_info_silver["prd_key"] = crm_prd_info_silver["prd_key"].str[6:]
 
-crm_prd_info_silver = (
-    src
-    .withColumn("cat_id", F.regexp_replace(F.substring("prd_key", 1, 5), "-", "_"))
-    .withColumn("prd_key", F.expr("substring(prd_key, 7, length(prd_key))"))
-    .withColumn("prd_cost", F.coalesce(F.col("prd_cost").cast("decimal(10,2)"), F.lit(0)))
-    .withColumn(
-        "prd_line",
-        F.when(F.upper(F.trim("prd_line")) == "R", "Road")
-         .when(F.upper(F.trim("prd_line")) == "M", "Mountain")
-         .when(F.upper(F.trim("prd_line")) == "S", "Other Sales")
-         .when(F.upper(F.trim("prd_line")) == "T", "Touring")
-         .otherwise("n/a")
-    )
-    .withColumn("prd_start_dt", F.col("prd_start_dt").cast("date"))
-    .withColumn(
-        "prd_end_dt",
-        F.date_sub(F.lead("prd_start_dt").over(w), 1)
-    )
+crm_prd_info_silver["prd_cost"] = pd.to_numeric(crm_prd_info_silver["prd_cost"], errors="coerce").fillna(0)
+
+crm_prd_info_silver["prd_line"] = (
+    crm_prd_info_silver["prd_line"].str.strip().str.upper()
+    .map({"R": "Road", "M": "Mountain", "S": "Other Sales", "T": "Touring"})
+    .fillna("n/a")
+)
+
+crm_prd_info_silver["prd_start_dt"] = pd.to_datetime(crm_prd_info_silver["prd_start_dt"], errors="coerce")
+
+# recompute end date as (next version's start date - 1 day), per product key
+crm_prd_info_silver = crm_prd_info_silver.sort_values(["prd_key", "prd_start_dt"])
+crm_prd_info_silver["prd_end_dt"] = (
+    crm_prd_info_silver.groupby("prd_key")["prd_start_dt"].shift(-1) - pd.Timedelta(days=1)
 )
 
 write_silver(crm_prd_info_silver, "crm_prd_info")
@@ -104,39 +110,35 @@ write_silver(crm_prd_info_silver, "crm_prd_info")
 
 # COMMAND ----------
 
-src = read_bronze("crm_sales_details")
+df = read_bronze("crm_sales_details")
 
-def parse_yyyymmdd(col):
-    c = F.col(col).cast("string")
-    return F.when(
-        (c == "0") | (F.length(c) != 8), None
-    ).otherwise(F.to_date(c, "yyyyMMdd"))
+def parse_yyyymmdd(series):
+    s = series.astype(str)
+    s = s.where((s != "0") & (s.str.len() == 8), other=np.nan)
+    return pd.to_datetime(s, format="%Y%m%d", errors="coerce")
 
-crm_sales_details_silver = (
-    src
-    .withColumn("sls_order_dt", parse_yyyymmdd("sls_order_dt"))
-    .withColumn("sls_ship_dt", parse_yyyymmdd("sls_ship_dt"))
-    .withColumn("sls_due_dt", parse_yyyymmdd("sls_due_dt"))
-    .withColumn("sls_quantity", F.col("sls_quantity").cast("int"))
-    .withColumn("sls_price", F.col("sls_price").cast("decimal(10,2)"))
-    .withColumn("sls_sales", F.col("sls_sales").cast("decimal(10,2)"))
-    .withColumn(
-        "sls_price",
-        F.when(
-            F.col("sls_price").isNull() | (F.col("sls_price") <= 0),
-            F.col("sls_sales") / F.when(F.col("sls_quantity") == 0, None).otherwise(F.col("sls_quantity"))
-        ).otherwise(F.col("sls_price"))
-    )
-    .withColumn(
-        "sls_sales",
-        F.when(
-            F.col("sls_sales").isNull()
-            | (F.col("sls_sales") < 0)
-            | (F.col("sls_sales") != F.col("sls_quantity") * F.abs(F.col("sls_price"))),
-            F.col("sls_quantity") * F.abs(F.col("sls_price"))
-        ).otherwise(F.col("sls_sales"))
-    )
+crm_sales_details_silver = df.copy()
+crm_sales_details_silver["sls_order_dt"] = parse_yyyymmdd(crm_sales_details_silver["sls_order_dt"])
+crm_sales_details_silver["sls_ship_dt"] = parse_yyyymmdd(crm_sales_details_silver["sls_ship_dt"])
+crm_sales_details_silver["sls_due_dt"] = parse_yyyymmdd(crm_sales_details_silver["sls_due_dt"])
+
+crm_sales_details_silver["sls_quantity"] = pd.to_numeric(crm_sales_details_silver["sls_quantity"], errors="coerce")
+crm_sales_details_silver["sls_price"] = pd.to_numeric(crm_sales_details_silver["sls_price"], errors="coerce")
+crm_sales_details_silver["sls_sales"] = pd.to_numeric(crm_sales_details_silver["sls_sales"], errors="coerce")
+
+needs_price = crm_sales_details_silver["sls_price"].isna() | (crm_sales_details_silver["sls_price"] <= 0)
+safe_qty = crm_sales_details_silver["sls_quantity"].replace(0, np.nan)
+crm_sales_details_silver.loc[needs_price, "sls_price"] = (
+    crm_sales_details_silver["sls_sales"] / safe_qty
+)[needs_price]
+
+expected_sales = crm_sales_details_silver["sls_quantity"] * crm_sales_details_silver["sls_price"].abs()
+needs_sales = (
+    crm_sales_details_silver["sls_sales"].isna()
+    | (crm_sales_details_silver["sls_sales"] < 0)
+    | (crm_sales_details_silver["sls_sales"] != expected_sales)
 )
+crm_sales_details_silver.loc[needs_sales, "sls_sales"] = expected_sales[needs_sales]
 
 write_silver(crm_sales_details_silver, "crm_sales_details")
 
@@ -149,23 +151,20 @@ write_silver(crm_sales_details_silver, "crm_sales_details")
 
 # COMMAND ----------
 
-src = read_bronze("erp_cust_az12")
+df = read_bronze("erp_cust_az12")
 
-erp_cust_az12_silver = (
-    src
-    .withColumn(
-        "cid",
-        F.when(F.col("cid").startswith("NAS"), F.expr("substring(cid, 4, length(cid))"))
-         .otherwise(F.col("cid"))
-    )
-    .withColumn("bdate", F.col("bdate").cast("date"))
-    .withColumn("bdate", F.when(F.col("bdate") > F.current_date(), None).otherwise(F.col("bdate")))
-    .withColumn(
-        "gen",
-        F.when(F.upper(F.trim("gen")).isin("M", "MALE"), "Male")
-         .when(F.upper(F.trim("gen")).isin("F", "FEMALE"), "Female")
-         .otherwise("n/a")
-    )
+erp_cust_az12_silver = df.copy()
+mask_nas = erp_cust_az12_silver["cid"].str.startswith("NAS")
+erp_cust_az12_silver.loc[mask_nas, "cid"] = erp_cust_az12_silver.loc[mask_nas, "cid"].str[3:]
+
+erp_cust_az12_silver["bdate"] = pd.to_datetime(erp_cust_az12_silver["bdate"], errors="coerce")
+future_bdate = erp_cust_az12_silver["bdate"] > pd.Timestamp(date.today())
+erp_cust_az12_silver.loc[future_bdate, "bdate"] = pd.NaT
+
+erp_cust_az12_silver["gen"] = (
+    erp_cust_az12_silver["gen"].str.strip().str.upper()
+    .map({"M": "Male", "MALE": "Male", "F": "Female", "FEMALE": "Female"})
+    .fillna("n/a")
 )
 
 write_silver(erp_cust_az12_silver, "erp_cust_az12")
@@ -179,19 +178,20 @@ write_silver(erp_cust_az12_silver, "erp_cust_az12")
 
 # COMMAND ----------
 
-src = read_bronze("erp_loc_a101")
+df = read_bronze("erp_loc_a101")
 
-erp_loc_a101_silver = (
-    src
-    .withColumn("cid", F.regexp_replace("cid", "-", ""))
-    .withColumn("cntry", F.trim("cntry"))
-    .withColumn(
-        "cntry",
-        F.when(F.upper(F.col("cntry")).isin("US", "USA"), "United States")
-         .when(F.upper(F.col("cntry")) == "DE", "Germany")
-         .when((F.col("cntry") == "") | F.col("cntry").isNull(), "n/a")
-         .otherwise(F.col("cntry"))
-    )
+erp_loc_a101_silver = df.copy()
+erp_loc_a101_silver["cid"] = erp_loc_a101_silver["cid"].str.replace("-", "", regex=False)
+erp_loc_a101_silver["cntry"] = erp_loc_a101_silver["cntry"].str.strip()
+
+erp_loc_a101_silver["cntry"] = np.select(
+    [
+        erp_loc_a101_silver["cntry"].str.upper().isin(["US", "USA"]),
+        erp_loc_a101_silver["cntry"].str.upper() == "DE",
+        (erp_loc_a101_silver["cntry"] == "") | erp_loc_a101_silver["cntry"].isna(),
+    ],
+    ["United States", "Germany", "n/a"],
+    default=erp_loc_a101_silver["cntry"],
 )
 
 write_silver(erp_loc_a101_silver, "erp_loc_a101")
@@ -205,14 +205,11 @@ write_silver(erp_loc_a101_silver, "erp_loc_a101")
 
 # COMMAND ----------
 
-src = read_bronze("erp_px_cat_g1v2")
+df = read_bronze("erp_px_cat_g1v2")
 
-erp_px_cat_g1v2_silver = (
-    src
-    .withColumn("cat", F.trim("cat"))
-    .withColumn("subcat", F.trim("subcat"))
-    .withColumn("maintenance", F.trim("maintenance"))
-)
+erp_px_cat_g1v2_silver = df.copy()
+for col in ("cat", "subcat", "maintenance"):
+    erp_px_cat_g1v2_silver[col] = erp_px_cat_g1v2_silver[col].str.strip()
 
 write_silver(erp_px_cat_g1v2_silver, "erp_px_cat_g1v2")
 
@@ -223,14 +220,12 @@ write_silver(erp_px_cat_g1v2_silver, "erp_px_cat_g1v2")
 
 # COMMAND ----------
 
-dupe_customers = (spark.table(f"{CATALOG}.silver.crm_cust_info")
-                   .groupBy("cst_id").count().filter("count > 1").count())
+silver_cust = spark.table(f"{CATALOG}.silver.crm_cust_info").toPandas()
+dupe_customers = silver_cust["cst_id"].duplicated().sum()
 print("duplicate cst_id in silver:", dupe_customers)
 
-bad_sales = (spark.table(f"{CATALOG}.silver.crm_sales_details")
-             .filter("sls_sales != sls_quantity * sls_price").count())
+silver_sales = spark.table(f"{CATALOG}.silver.crm_sales_details").toPandas()
+bad_sales = (silver_sales["sls_sales"] != silver_sales["sls_quantity"] * silver_sales["sls_price"]).sum()
 print("rows where sls_sales != quantity * price:", bad_sales)
 
-genders = [r.cst_gndr for r in
-           spark.table(f"{CATALOG}.silver.crm_cust_info").select("cst_gndr").distinct().collect()]
-print("cst_gndr distinct values:", genders)
+print("cst_gndr distinct values:", silver_cust["cst_gndr"].unique().tolist())

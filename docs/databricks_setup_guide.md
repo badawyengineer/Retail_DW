@@ -5,6 +5,9 @@ Catalog, serverless compute, notebooks, and a Volume — no cluster and no
 Databricks CLI/Asset Bundle setup required. Everything below is doable from
 the Workspace UI.
 
+Transform logic in the notebooks is pandas, not PySpark — pandas ships with
+the Databricks Runtime already, so no extra library install is needed.
+
 ## 1. Load the notebooks into the workspace
 
 Two options:
@@ -28,9 +31,12 @@ Two options:
 2. Go to Catalog → `retail_dwh` → `bronze` → `raw_files` (or Catalog Explorer's
    Volume UI) and upload the six CSVs from `/datasets`.
 3. Run `01_bronze_ingestion`, then `02_silver_transformation`, then
-   `03_gold_views`, each with "Run All."
+   `03_gold_tables`, each with "Run All."
 4. Run `tests/validation_tests.py` and confirm every check cell comes back
    empty.
+5. Gold is now physical tables, not views (pandas can't create a view) — if
+   you re-run Silver later, re-run `03_gold_tables` afterward too, or Gold
+   will be stale.
 
 ## 3. Compute
 

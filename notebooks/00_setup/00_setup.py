@@ -5,6 +5,10 @@
 # MAGIC a dedicated catalog, the three medallion schemas, and a volume that acts
 # MAGIC as the landing zone for the raw CRM/ERP files. Run this once per workspace
 # MAGIC before touching the ingestion notebooks.
+# MAGIC
+# MAGIC Catalog/schema/volume creation is a Unity Catalog operation, not a data
+# MAGIC transform — it has to go through `spark.sql`, which is why this one
+# MAGIC notebook still uses Spark even though 01-03 use pandas.
 
 # COMMAND ----------
 

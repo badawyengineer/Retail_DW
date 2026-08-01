@@ -8,8 +8,11 @@ pattern.
 
 - Unity Catalog (catalog: `retail_dwh`, schemas: `bronze` / `silver` / `gold`)
 - Databricks serverless compute, no cluster management
-- Delta Lake for Bronze/Silver, Spark SQL views for Gold
-- PySpark + Spark SQL notebooks
+- Delta Lake for storage at every layer
+- **pandas** for all transform logic; Spark is used only where it's
+  structurally required — Unity Catalog operations (`00_setup`) and the
+  final Delta write on each notebook (`spark.createDataFrame(df).write...`),
+  since Delta itself is a Spark-native format
 
 ## Repository structure
 
@@ -19,29 +22,37 @@ pattern.
 /notebooks/01_bronze_ingestion  raw load of the six CSVs into Bronze Delta tables
 /notebooks/02_silver_transformation
                                  cleansing, standardization, business rules
-/notebooks/03_gold_views        star schema (dim_customers, dim_products, fact_sales)
+/notebooks/03_gold_tables       star schema (dim_customers, dim_products, fact_sales)
 /tests                          validation queries (section 6 checks)
 /docs                           project brief, data catalog, Databricks setup guide
-/window_functions_practice      unrelated SQL exercise (al_noor_trading schema/seed)
 ```
-
-`/window_functions_practice` is a separate SQL practice set (window
-functions: RANK, LAG/LEAD, running totals, etc.) — it isn't part of the
-medallion pipeline, just bundled in the same submission for convenience.
 
 ## Running the pipeline
 
 1. `00_setup` — creates the catalog/schemas/volume (run once).
 2. Upload the six CSVs into `/Volumes/retail_dwh/bronze/raw_files/`.
-3. `01_bronze_ingestion` — lands the raw files as Bronze Delta tables.
-4. `02_silver_transformation` — reads Bronze, applies the cleansing rules,
-   writes Silver Delta tables.
-5. `03_gold_views` — creates/replaces the three Gold views.
+3. `01_bronze_ingestion` — pandas reads the raw files off the Volume, lands
+   them as Bronze Delta tables.
+4. `02_silver_transformation` — pulls each Bronze table into pandas with
+   `.toPandas()`, applies the cleansing rules, writes Silver Delta tables.
+5. `03_gold_tables` — merges the Silver tables in pandas into the star
+   schema, writes the three Gold Delta tables.
 6. `tests/validation_tests` — re-runs the section 6 checks against the
-   result.
+   result, in pandas.
 
 Every load uses `mode('overwrite')`, so the whole pipeline is idempotent —
 safe to re-run end to end from a clean Bronze load.
+
+**Note on Gold:** this is a change from a pure-PySpark design, where Gold
+was three `CREATE OR REPLACE VIEW` statements that stayed live automatically.
+A pandas DataFrame can't define a database view, so Gold here is physical
+tables — which means `03_gold_tables` needs to be re-run after every Silver
+refresh to stay current. See the comment at the top of that notebook.
+
+**Note on scale:** `.toPandas()` collects a full table onto the driver node.
+Fine for a dataset this size; if source volume grows significantly, revisit
+whether pandas is still the right choice for Silver/Gold, or use Spark's
+pandas API (`pyspark.pandas`) to keep the same pandas-style code distributed.
 
 ## Data sources
 

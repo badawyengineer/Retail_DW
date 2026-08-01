@@ -2,27 +2,30 @@
 # MAGIC %md
 # MAGIC ### Validation Tests
 # MAGIC Runs the Bronze / Silver / Gold checks from section 6 of the project
-# MAGIC doc. Each cell should return zero rows (or an empty result) when the
-# MAGIC pipeline is healthy — any output here means a rule broke somewhere
-# MAGIC upstream.
+# MAGIC doc. Each cell should print an empty/zero result when the pipeline is
+# MAGIC healthy — any rows returned here mean a rule broke somewhere upstream.
+# MAGIC
+# MAGIC Same as the rest of the pipeline: each Delta table is pulled down with
+# MAGIC `.toPandas()` and checked with pandas rather than Spark SQL.
 
 # COMMAND ----------
 
+import pandas as pd
+
 CATALOG = "retail_dwh"
-spark.sql(f"USE CATALOG {CATALOG}")
 
 # COMMAND ----------
 
 # MAGIC %md #### 6.1 Bronze — row counts vs. source
 # MAGIC (compare against the counts printed by 01_bronze_ingestion / the raw
 # MAGIC CSV row counts; Bronze itself does no filtering so this is a manual
-# MAGIC cross-check rather than a query.)
+# MAGIC cross-check rather than a rule.)
 
 # COMMAND ----------
 
 for tbl in ("crm_cust_info", "crm_prd_info", "crm_sales_details",
             "erp_cust_az12", "erp_loc_a101", "erp_px_cat_g1v2"):
-    print(tbl, spark.table(f"bronze.{tbl}").count())
+    print(tbl, spark.table(f"{CATALOG}.bronze.{tbl}").count())
 
 # COMMAND ----------
 
@@ -30,57 +33,50 @@ for tbl in ("crm_cust_info", "crm_prd_info", "crm_sales_details",
 
 # COMMAND ----------
 
-# no duplicate customer / product keys
-display(spark.sql("""
-SELECT cst_id, COUNT(*) c FROM silver.crm_cust_info
-GROUP BY cst_id HAVING COUNT(*) > 1
-"""))
+silver_cust = spark.table(f"{CATALOG}.silver.crm_cust_info").toPandas()
+silver_prd = spark.table(f"{CATALOG}.silver.crm_prd_info").toPandas()
+silver_sales = spark.table(f"{CATALOG}.silver.crm_sales_details").toPandas()
+silver_loc = spark.table(f"{CATALOG}.silver.erp_loc_a101").toPandas()
 
-display(spark.sql("""
-SELECT prd_key, COUNT(*) c FROM silver.crm_prd_info
-GROUP BY prd_key HAVING COUNT(*) > 1
-"""))
+# no duplicate customer / product keys
+print("duplicate cst_id:", silver_cust["cst_id"].duplicated().sum())
+print("duplicate prd_key:", silver_prd["prd_key"].duplicated().sum())
 
 # COMMAND ----------
 
 # categorical columns limited to the approved value set
-display(spark.sql("SELECT DISTINCT cst_gndr FROM silver.crm_cust_info"))
-display(spark.sql("SELECT DISTINCT cst_marital_status FROM silver.crm_cust_info"))
-display(spark.sql("SELECT DISTINCT prd_line FROM silver.crm_prd_info"))
-display(spark.sql("SELECT DISTINCT cntry FROM silver.erp_loc_a101"))
+print("cst_gndr values:", silver_cust["cst_gndr"].unique().tolist())
+print("cst_marital_status values:", silver_cust["cst_marital_status"].unique().tolist())
+print("prd_line values:", silver_prd["prd_line"].unique().tolist())
+print("cntry values:", silver_loc["cntry"].unique().tolist())
 
 # COMMAND ----------
 
-# date columns: no leftover placeholder integers, no invalid values
-display(spark.sql("""
-SELECT * FROM silver.crm_sales_details
-WHERE sls_order_dt > sls_due_dt OR sls_order_dt > sls_ship_dt
-"""))
+# date columns: order_dt shouldn't be after ship_dt or due_dt
+bad_dates = silver_sales[
+    (silver_sales["sls_order_dt"] > silver_sales["sls_due_dt"])
+    | (silver_sales["sls_order_dt"] > silver_sales["sls_ship_dt"])
+]
+print("rows with order_dt after ship/due dt:", len(bad_dates))
 
 # COMMAND ----------
 
 # sls_sales == quantity * price, both positive
-display(spark.sql("""
-SELECT * FROM silver.crm_sales_details
-WHERE sls_sales != sls_quantity * sls_price
-   OR sls_quantity <= 0
-   OR sls_price <= 0
-"""))
+bad_sales = silver_sales[
+    (silver_sales["sls_sales"] != silver_sales["sls_quantity"] * silver_sales["sls_price"])
+    | (silver_sales["sls_quantity"] <= 0)
+    | (silver_sales["sls_price"] <= 0)
+]
+print("rows failing sales = quantity * price:", len(bad_sales))
 
 # COMMAND ----------
 
 # referential integrity: every sales customer/product exists in the dimension source
-display(spark.sql("""
-SELECT s.sls_cust_id FROM silver.crm_sales_details s
-LEFT JOIN silver.crm_cust_info c ON s.sls_cust_id = c.cst_id
-WHERE c.cst_id IS NULL
-"""))
+orphan_customers = silver_sales[~silver_sales["sls_cust_id"].isin(silver_cust["cst_id"])]
+print("sales rows with unknown customer:", len(orphan_customers))
 
-display(spark.sql("""
-SELECT s.sls_prd_key FROM silver.crm_sales_details s
-LEFT JOIN silver.crm_prd_info p ON s.sls_prd_key = p.prd_key
-WHERE p.prd_key IS NULL
-"""))
+orphan_products = silver_sales[~silver_sales["sls_prd_key"].isin(silver_prd["prd_key"])]
+print("sales rows with unknown product:", len(orphan_products))
 
 # COMMAND ----------
 
@@ -88,26 +84,24 @@ WHERE p.prd_key IS NULL
 
 # COMMAND ----------
 
-silver_rows = spark.table("silver.crm_sales_details").count()
-gold_rows = spark.table("gold.fact_sales").count()
-print("silver.crm_sales_details:", silver_rows, "| gold.fact_sales:", gold_rows)
-assert silver_rows == gold_rows, "row count mismatch between silver and gold fact"
+gold_fact = spark.table(f"{CATALOG}.gold.fact_sales").toPandas()
+
+print("silver.crm_sales_details:", len(silver_sales), "| gold.fact_sales:", len(gold_fact))
+assert len(silver_sales) == len(gold_fact), "row count mismatch between silver and gold fact"
 
 # COMMAND ----------
 
 # no unexpected NULL surrogate keys
-display(spark.sql("""
-SELECT * FROM gold.fact_sales
-WHERE customer_key IS NULL OR product_key IS NULL
-"""))
+missing_keys = gold_fact[gold_fact["customer_key"].isna() | gold_fact["product_key"].isna()]
+print("fact_sales rows with missing surrogate keys:", len(missing_keys))
 
 # COMMAND ----------
 
-# spot-check: total sales by country, matched against a manual silver-side rollup
-display(spark.sql("""
-SELECT dc.country, SUM(fs.sales_amount) AS total_sales
-FROM gold.fact_sales fs
-JOIN gold.dim_customers dc ON fs.customer_key = dc.customer_key
-GROUP BY dc.country
-ORDER BY total_sales DESC
-"""))
+# spot-check: total sales by country
+gold_cust = spark.table(f"{CATALOG}.gold.dim_customers").toPandas()
+by_country = (
+    gold_fact.merge(gold_cust[["customer_key", "country"]], on="customer_key", how="left")
+    .groupby("country")["sales_amount"].sum()
+    .sort_values(ascending=False)
+)
+print(by_country)
