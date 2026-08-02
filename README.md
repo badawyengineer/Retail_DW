@@ -18,13 +18,15 @@ pattern.
 
 ```
 /datasets                       six source CSVs go here (see datasets/README.md)
+/exploration                    data profiling — the findings every Silver rule is based on
 /notebooks/00_setup             catalog, schemas, volume creation
 /notebooks/01_bronze_ingestion  raw load of the six CSVs into Bronze Delta tables
 /notebooks/02_silver_transformation
                                  cleansing, standardization, business rules
 /notebooks/03_gold_tables       star schema (dim_customers, dim_products, fact_sales)
 /tests                          validation queries (section 6 checks)
-/docs                           project brief, data catalog, Databricks setup guide
+/docs                           project brief, schema design, data catalog,
+                                 full project report, Databricks setup guide
 ```
 
 ## Running the pipeline
@@ -33,11 +35,15 @@ pattern.
 2. Upload the six CSVs into `/Volumes/retail_dwh/bronze/raw_files/`.
 3. `01_bronze_ingestion` — pandas reads the raw files off the Volume, lands
    them as Bronze Delta tables.
-4. `02_silver_transformation` — pulls each Bronze table into pandas with
+4. (optional but recommended) `exploration/data_profiling` — re-run this
+   against any new batch of source data; it's the actual inspection every
+   Silver rule below is based on, so a new batch can surface findings the
+   current rules don't cover yet.
+5. `02_silver_transformation` — pulls each Bronze table into pandas with
    `.toPandas()`, applies the cleansing rules, writes Silver Delta tables.
-5. `03_gold_tables` — merges the Silver tables in pandas into the star
+6. `03_gold_tables` — merges the Silver tables in pandas into the star
    schema, writes the three Gold Delta tables.
-6. `tests/validation_tests` — re-runs the section 6 checks against the
+7. `tests/validation_tests` — re-runs the section 6 checks against the
    result, in pandas.
 
 Every load uses `mode('overwrite')`, so the whole pipeline is idempotent —
