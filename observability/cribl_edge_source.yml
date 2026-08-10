@@ -1,0 +1,44 @@
+# observability/cribl_edge_source.yml
+#
+# Example Cribl Edge Source configuration for collecting the structured
+# pipeline events emitted by observability/metrics_logger.py.
+#
+# This is a reference config, not something applied automatically — it's
+# meant to be pasted into Cribl Edge's Sources UI (or applied via the
+# Cribl API/Terraform provider) on the Edge Node/Fleet that has access to
+# the Databricks cluster's driver log files.
+#
+# Not tested against a live Cribl Edge instance in this repo — no Cribl
+# deployment was available to verify against. Treat this as a documented
+# starting point, confirm the exact log path for your workspace/cluster
+# before relying on it.
+
+id: retail-dwh-databricks-driver-logs
+type: file_monitor          # tails files, matches how driver logs are written
+disabled: false
+
+conf:
+  # Databricks writes driver stdout here by default; adjust for your
+  # workspace's actual cluster log delivery path if you've configured one
+  # (Workspace admin settings -> Compute -> cluster log delivery).
+  filenames:
+    - "/databricks/driver/logs/stdout*"
+
+  # metrics_logger.py emits one JSON object per line — this tells Cribl to
+  # parse each line as its own event rather than as one giant blob.
+  multilineEvent: false
+
+  # Only pull in lines that are actually pipeline events (they all start
+  # with an event_type field), so we're not shipping every stray print
+  # statement from other notebooks running on the same cluster.
+  breakerRulesetName: json_line
+
+fields:
+  source_system: databricks
+  project: retail_dwh
+
+# Route matched events to wherever your team already centralizes logs —
+# example destinations, pick what actually exists in your environment:
+pipeline: retail_dwh_pipeline_events
+output: default_destination   # e.g. Splunk HEC, S3, Elasticsearch, etc. —
+                               # configured separately in Cribl's Destinations UI

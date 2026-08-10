@@ -3,32 +3,23 @@
 # MAGIC ### 01_bronze_ingestion
 # MAGIC Loads the six source CSVs from the Volume as-is into managed Delta tables.
 # MAGIC No business logic here — the only job of this layer is a reliable,
-# MAGIC untransformed copy of the source.
+# MAGIC untransformed copy of the source, with a row count printed after every
+# MAGIC write so the notebook run history doubles as the load audit log.
 # MAGIC
-# MAGIC Reads and holds the data with **pandas**, since a Volume path is just a
-# MAGIC regular filesystem path on the driver (`/Volumes/...`) and these files
-# MAGIC are small enough for a single node. Delta itself is a Spark-native
-# MAGIC format, so the only place Spark shows up is the final write — each
-# MAGIC pandas DataFrame gets handed to `spark.createDataFrame()` right before
-# MAGIC `saveAsTable()`.
+# MAGIC PySpark throughout — reads are distributed rather than pulled onto a
+# MAGIC single driver, which matters once source volume grows past what pandas
+# MAGIC comfortably holds.
 
 # COMMAND ----------
 
-import pandas as pd
+from observability.metrics_logger import log_event
 
 CATALOG = "retail_dwh"
 RAW_PATH = f"/Volumes/{CATALOG}/bronze/raw_files"
 
 # read everything as strings at this stage — type-casting and validation
 # belong in Silver, not here
-READ_OPTS = {"dtype": str, "keep_default_na": False}
-
-def load_to_bronze(csv_name, table_name):
-    pdf = pd.read_csv(f"{RAW_PATH}/{csv_name}", **READ_OPTS)
-    sdf = spark.createDataFrame(pdf)
-    sdf.write.mode("overwrite").saveAsTable(f"{CATALOG}.bronze.{table_name}")
-    print(f"{table_name:<20} {len(pdf):>8} rows")
-    return pdf
+READ_OPTS = {"header": "true", "inferSchema": "false"}
 
 # COMMAND ----------
 
@@ -37,15 +28,30 @@ def load_to_bronze(csv_name, table_name):
 
 # COMMAND ----------
 
-crm_cust_info = load_to_bronze("cust_info.csv", "crm_cust_info")
+crm_cust_info = spark.read.options(**READ_OPTS).csv(f"{RAW_PATH}/cust_info.csv")
+(crm_cust_info.write.mode("overwrite")
+    .saveAsTable(f"{CATALOG}.bronze.crm_cust_info"))
+n = crm_cust_info.count()
+print("crm_cust_info rows:", n)
+log_event("bronze_load", table="crm_cust_info", row_count=n)
 
 # COMMAND ----------
 
-crm_prd_info = load_to_bronze("prd_info.csv", "crm_prd_info")
+crm_prd_info = spark.read.options(**READ_OPTS).csv(f"{RAW_PATH}/prd_info.csv")
+(crm_prd_info.write.mode("overwrite")
+    .saveAsTable(f"{CATALOG}.bronze.crm_prd_info"))
+n = crm_prd_info.count()
+print("crm_prd_info rows:", n)
+log_event("bronze_load", table="crm_prd_info", row_count=n)
 
 # COMMAND ----------
 
-crm_sales_details = load_to_bronze("sales_details.csv", "crm_sales_details")
+crm_sales_details = spark.read.options(**READ_OPTS).csv(f"{RAW_PATH}/sales_details.csv")
+(crm_sales_details.write.mode("overwrite")
+    .saveAsTable(f"{CATALOG}.bronze.crm_sales_details"))
+n = crm_sales_details.count()
+print("crm_sales_details rows:", n)
+log_event("bronze_load", table="crm_sales_details", row_count=n)
 
 # COMMAND ----------
 
@@ -54,15 +60,30 @@ crm_sales_details = load_to_bronze("sales_details.csv", "crm_sales_details")
 
 # COMMAND ----------
 
-erp_cust_az12 = load_to_bronze("CUST_AZ12.csv", "erp_cust_az12")
+erp_cust_az12 = spark.read.options(**READ_OPTS).csv(f"{RAW_PATH}/CUST_AZ12.csv")
+(erp_cust_az12.write.mode("overwrite")
+    .saveAsTable(f"{CATALOG}.bronze.erp_cust_az12"))
+n = erp_cust_az12.count()
+print("erp_cust_az12 rows:", n)
+log_event("bronze_load", table="erp_cust_az12", row_count=n)
 
 # COMMAND ----------
 
-erp_loc_a101 = load_to_bronze("LOC_A101.csv", "erp_loc_a101")
+erp_loc_a101 = spark.read.options(**READ_OPTS).csv(f"{RAW_PATH}/LOC_A101.csv")
+(erp_loc_a101.write.mode("overwrite")
+    .saveAsTable(f"{CATALOG}.bronze.erp_loc_a101"))
+n = erp_loc_a101.count()
+print("erp_loc_a101 rows:", n)
+log_event("bronze_load", table="erp_loc_a101", row_count=n)
 
 # COMMAND ----------
 
-erp_px_cat_g1v2 = load_to_bronze("PX_CAT_G1V2.csv", "erp_px_cat_g1v2")
+erp_px_cat_g1v2 = spark.read.options(**READ_OPTS).csv(f"{RAW_PATH}/PX_CAT_G1V2.csv")
+(erp_px_cat_g1v2.write.mode("overwrite")
+    .saveAsTable(f"{CATALOG}.bronze.erp_px_cat_g1v2"))
+n = erp_px_cat_g1v2.count()
+print("erp_px_cat_g1v2 rows:", n)
+log_event("bronze_load", table="erp_px_cat_g1v2", row_count=n)
 
 # COMMAND ----------
 

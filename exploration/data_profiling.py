@@ -6,17 +6,15 @@
 # MAGIC notebook — nothing in Silver is guessed, it's a response to something
 # MAGIC found here. Re-run this whenever new source data lands, since a rule
 # MAGIC written against one batch can go stale against the next.
-# MAGIC
-# MAGIC pandas throughout, same as the rest of the pipeline.
 
 # COMMAND ----------
 
-import pandas as pd
+from pyspark.sql import functions as F
 
 CATALOG = "retail_dwh"
 
 def read_bronze(table):
-    return spark.table(f"{CATALOG}.bronze.{table}").toPandas()
+    return spark.table(f"{CATALOG}.bronze.{table}")
 
 # COMMAND ----------
 
@@ -36,10 +34,11 @@ def read_bronze(table):
 
 df = read_bronze("crm_cust_info")
 
-print("duplicate cst_id count:", df["cst_id"].duplicated().sum())
-print("cst_gndr raw distinct values:", df["cst_gndr"].unique().tolist())
-print("cst_marital_status raw distinct values:", df["cst_marital_status"].unique().tolist())
-print("rows with blank/null cst_id:", (df["cst_id"].isna() | (df["cst_id"] == "")).sum())
+dupes = df.groupBy("cst_id").count().filter("count > 1").count()
+print("duplicate cst_id count:", dupes)
+print("cst_gndr raw distinct values:", [r[0] for r in df.select("cst_gndr").distinct().collect()])
+print("cst_marital_status raw distinct values:", [r[0] for r in df.select("cst_marital_status").distinct().collect()])
+print("rows with blank/null cst_id:", df.filter((F.col("cst_id").isNull()) | (F.col("cst_id") == "")).count())
 
 # COMMAND ----------
 
@@ -62,10 +61,10 @@ print("rows with blank/null cst_id:", (df["cst_id"].isna() | (df["cst_id"] == ""
 
 df = read_bronze("crm_prd_info")
 
-print("prd_key sample (first 5 chars vs rest):",
-      df["prd_key"].str[:5].unique()[:5].tolist())
-print("prd_cost nulls:", pd.to_numeric(df["prd_cost"], errors="coerce").isna().sum())
-print("prd_line raw distinct values:", df["prd_line"].unique().tolist())
+print("prd_key sample (first 5 chars):",
+      [r[0] for r in df.select(F.substring("prd_key", 1, 5)).distinct().limit(5).collect()])
+print("prd_cost nulls:", df.filter(F.col("prd_cost").cast("decimal(10,2)").isNull()).count())
+print("prd_line raw distinct values:", [r[0] for r in df.select("prd_line").distinct().collect()])
 
 # COMMAND ----------
 
@@ -86,12 +85,16 @@ print("prd_line raw distinct values:", df["prd_line"].unique().tolist())
 
 df = read_bronze("crm_sales_details")
 
-print("sls_order_dt == '0':", (df["sls_order_dt"].astype(str) == "0").sum())
-qty = pd.to_numeric(df["sls_quantity"], errors="coerce")
-price = pd.to_numeric(df["sls_price"], errors="coerce")
-sales = pd.to_numeric(df["sls_sales"], errors="coerce")
-print("rows where sales != quantity * price:", (sales != qty * price).sum())
-print("rows with null/non-positive price:", (price.isna() | (price <= 0)).sum())
+print("sls_order_dt == '0':", df.filter(F.col("sls_order_dt").cast("string") == "0").count())
+mismatched = df.filter(
+    F.col("sls_sales").cast("decimal(10,2)")
+    != F.col("sls_quantity").cast("int") * F.col("sls_price").cast("decimal(10,2)")
+).count()
+print("rows where sales != quantity * price:", mismatched)
+bad_price = df.filter(
+    F.col("sls_price").cast("decimal(10,2)").isNull() | (F.col("sls_price").cast("decimal(10,2)") <= 0)
+).count()
+print("rows with null/non-positive price:", bad_price)
 
 # COMMAND ----------
 
@@ -107,10 +110,10 @@ print("rows with null/non-positive price:", (price.isna() | (price <= 0)).sum())
 
 df = read_bronze("erp_cust_az12")
 
-print("cid with NAS prefix:", df["cid"].str.startswith("NAS").sum())
-bdate = pd.to_datetime(df["bdate"], errors="coerce")
-print("bdate values in the future:", (bdate > pd.Timestamp.today()).sum())
-print("gen raw distinct values:", df["gen"].unique().tolist())
+print("cid with NAS prefix:", df.filter(F.col("cid").startswith("NAS")).count())
+future_bdate = df.filter(F.col("bdate").cast("date") > F.current_date()).count()
+print("bdate values in the future:", future_bdate)
+print("gen raw distinct values:", [r[0] for r in df.select("gen").distinct().collect()])
 
 # COMMAND ----------
 
@@ -127,7 +130,7 @@ print("gen raw distinct values:", df["gen"].unique().tolist())
 
 df = read_bronze("erp_loc_a101")
 
-print("cntry raw distinct values:", df["cntry"].unique().tolist())
+print("cntry raw distinct values:", [r[0] for r in df.select("cntry").distinct().collect()])
 
 # COMMAND ----------
 
@@ -141,4 +144,5 @@ print("cntry raw distinct values:", df["cntry"].unique().tolist())
 df = read_bronze("erp_px_cat_g1v2")
 
 print("nulls per column:")
-print(df.isna().sum())
+for c in df.columns:
+    print(f"  {c}: {df.filter(F.col(c).isNull()).count()}")

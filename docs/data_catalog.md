@@ -47,10 +47,15 @@
 
 ## Notes
 
-- All three Gold objects are physical Delta tables, built by merging Silver
-  tables in pandas and writing with `mode('overwrite')`. Unlike a SQL view,
-  they do **not** auto-refresh — re-run `03_gold_tables` after any Silver
-  reload to keep them current.
-- Surrogate keys are generated from pandas row position (`index + 1`) at
-  build time; they are not guaranteed to match prior runs if the underlying
-  Silver row order changes.
+- All three Gold objects are views (`CREATE OR REPLACE VIEW`), not physical
+  tables — they always reflect the latest Silver data with no separate load
+  step. (An earlier revision of this project used pandas and had to make
+  these physical tables since a DataFrame can't define a view; now that the
+  pipeline is back on PySpark, they're views again.)
+- Surrogate keys are `ROW_NUMBER()`-generated and are stable only within a
+  given query — they are not guaranteed to match prior runs if the
+  underlying Silver row order changes.
+- The `dlt_pipeline/` folder has an alternative implementation of this same
+  schema as Delta Live Tables, with built-in data-quality expectations
+  instead of separate validation queries. See that folder's notebook for
+  details.
